@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tetris</title>
+</head>
+<body style="background:#111; margin:0; padding:20px;">
+
+<div style="display:flex; gap:30px; align-items:flex-start;">
+    <div>
+        <div style="color:white; font-family:monospace; font-size:18px; margin-bottom:6px;">SCORE: <span id="scoreDisplay">0</span></div>
+        <canvas id="tetris" width="350" height="700"></canvas>
+    </div>
+    <canvas id="screen2" width="350" height="700" style="background:#222; margin-top:28px;"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById("tetris");
+const ctx = canvas.getContext("2d");
+const cellSize = 35;
+
+let fallSpeed = 500;
+let lastTime = 0;
+let startTime = null;
+
+let lockDelay = 0;
+const LOCK_TIME = 500;
+
+let score = 0;
+const scoreEl = document.getElementById("scoreDisplay");
+
+const board = [];
+for (let r = 0; r < 20; r++) board.push(new Array(10).fill(0));
+
+const TETROMINOES = {
+    I: [[1,1,1,1]],
+    O: [[1,1],[1,1]],
+    T: [[0,1,0],[1,1,1]],
+    L: [[1,0,0],[1,1,1]],
+    J: [[0,0,1],[1,1,1]],
+    S: [[0,1,1],[1,1,0]],
+    Z: [[1,1,0],[0,1,1]]
+};
+
+const COLORS = {
+    I: "cyan", O: "yellow", T: "purple",
+    L: "orange", J: "blue", S: "green", Z: "red"
+};
+
+const WEIGHTS = [-0.7173742371911298, -0.8620685821244413, -0.2690727016603114, -0.011652062884397019, -0.06754924688885461];
+
+let currentPiece = randomPiece();
+let pieceX = 3;
+let pieceY = 0;
+
+function randomPiece() {
+    const keys = Object.keys(TETROMINOES);
+    const rand = keys[Math.floor(Math.random() * keys.length)];
+    return {
+        shape: JSON.parse(JSON.stringify(TETROMINOES[rand])),
+        color: COLORS[rand]
+    };
+}
+
+function drawBoard() {
+    for (let r = 0; r < 20; r++) {
+        for (let c = 0; c < 10; c++) {
+            ctx.fillStyle = board[r][c] !== 0 ? board[r][c] : "#222";
+            ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+        }
+    }
+}
+
+function drawPiece(piece, x, y) {
+    const shape = piece.shape;
+    for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+            if (shape[r][c] === 1) {
+                ctx.fillStyle = piece.color;
+                ctx.fillRect((x + c) * cellSize, (y + r) * cellSize, cellSize, cellSize);
+            }
+        }
+    }
+}
+
+function rotate(shape) {
+    const rows = shape.length;
+    const cols = shape[0].length;
+    const rotated = [];
+    for (let c = 0; c < cols; c++) {
+        rotated[c] = [];
+        for (let r = rows - 1; r >= 0; r--) {
+            rotated[c].push(shape[r][c]);
+        }
+    }
+    return rotated;
+}
+
+function willCollide(shape, x, y) {
+    for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+            if (shape[r][c] === 1) {
+                if (y + r + 1 >= 20) return true;
+                if (board[y + r + 1][x + c] !== 0) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function willCollideSide(shape, x, y, dir) {
+    for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+            if (shape[r][c] === 1) {
+                const newX = x + c + dir;
+                if (newX < 0 || newX >= 10) return true;
+                if (board[y + r][newX] !== 0) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function canPlace(shape, x, y) {
+    for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+            if (shape[r][c] === 1) {
+                if (x + c < 0 || x + c >= 10) return false;
+                if (y + r < 0 || y + r >= 20) return false;
+                if (board[y + r][x + c] !== 0) return false;
+            }
+        }
+    }
+    return true;
+}
+
+function lockPiece(shape, x, y, color) {
+    for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+            if (shape[r][c] === 1) {
+                board[y + r][x + c] = color;
+            }
+        }
+    }
+}
+
+function clearLines() {
+    let cleared = 0;
+    for (let r = 0; r < 20; r++) {
+        if (board[r].every(cell => cell !== 0)) {
+            board.splice(r, 1);
+            board.unshift(new Array(10).fill(0));
+            cleared++;
+        }
+    }
+    if (cleared > 0) {
+        score += [0, 100, 300, 500, 800][cleared] || cleared * 100;
+        scoreEl.textContent = score;
+    }
+}
+
+function resetPiece() {
+    currentPiece = randomPiece();
+    pieceX = 3;
+    pieceY = 0;
+
+    if (!canPlace(currentPiece.shape, pieceX, pieceY)) {
+        alert("Game Over! Score: " + score);
+        location.reload();
+    } else {
+        if (aiEnabled) aiDecideMove();
+    }
+}
+
+// ---- AI ----
+
+function getRotations(shape) {
+    const seen = new Set();
+    const result = [];
+    let cur = shape;
+    for (let i = 0; i < 4; i++) {
+        const key = JSON.stringify(cur);
+        if (!seen.has(key)) { seen.add(key); result.push(JSON.parse(JSON.stringify(cur))); }
+        cur = rotate(cur);
+    }
+    return result;
+}
+
+function dropY(shape, x) {
+    let y = 0;
+    while (!willCollideAt(shape, x, y)) y++;
+    return y;
+}
+
+function willCollideAt(shape, x, y) {
+    for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+            if (shape[r][c] === 1) {
+                if (y + r + 1 >= 20) return true;
+                if (board[y + r + 1] && board[y + r + 1][x + c] !== 0) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function getFeatures(simBoard) {
+    const WIDTH = 10, HEIGHT = 20;
+    const heights = [];
+    let holes = 0;
+    for (let c = 0; c < WIDTH; c++) {
+        let colHeight = 0, seenBlock = false;
+        for (let r = 0; r < HEIGHT; r++) {
+            if (simBoard[r][c] !== 0) { if (!seenBlock) { colHeight = HEIGHT - r; seenBlock = true; } }
+            else if (seenBlock) holes++;
+        }
+        heights.push(colHeight);
+    }
+    const aggregateHeight = heights.reduce((a, b) => a + b, 0);
+    let bumpiness = 0;
+    for (let i = 0; i < WIDTH - 1; i++) bumpiness += Math.abs(heights[i] - heights[i + 1]);
+    const avgH = aggregateHeight / WIDTH;
+    const heightVariance = heights.reduce((s, h) => s + (h - avgH) ** 2, 0);
+    let wells = 0;
+    for (let c = 0; c < WIDTH; c++) {
+        const left = c > 0 ? heights[c - 1] : 999;
+        const right = c < WIDTH - 1 ? heights[c + 1] : 999;
+        if (heights[c] < left && heights[c] < right) wells += Math.min(left, right) - heights[c];
+    }
+    return [aggregateHeight, holes, bumpiness, heightVariance, wells];
+}
+
+function scoreFeatures(features) {
+    return WEIGHTS.reduce((s, w, i) => s + w * features[i], 0);
+}
+
+function simulatePlacement(shape, x, y, color) {
+    const sim = board.map(row => row.slice());
+    for (let r = 0; r < shape.length; r++)
+        for (let c = 0; c < shape[r].length; c++)
+            if (shape[r][c] === 1) sim[y + r][x + c] = color;
+    let filtered = sim.filter(row => row.some(cell => cell === 0));
+    while (filtered.length < 20) filtered.unshift(new Array(10).fill(0));
+    return filtered;
+}
+
+let aiEnabled = false;
+let aiTarget = null;
+
+function aiDecideMove() {
+    const rotations = getRotations(currentPiece.shape);
+    let bestScore = -Infinity, bestPlacement = null;
+    for (const shape of rotations) {
+        const pw = shape[0].length;
+        for (let x = 0; x <= 10 - pw; x++) {
+            if (!canPlace(shape, x, 0)) continue;
+            const y = dropY(shape, x);
+            if (!canPlace(shape, x, y)) continue;
+            const simBoard = simulatePlacement(shape, x, y, currentPiece.color);
+            const s = scoreFeatures(getFeatures(simBoard));
+            if (s > bestScore) { bestScore = s; bestPlacement = { shape, x, y }; }
+        }
+    }
+    aiTarget = bestPlacement;
+    if (aiTarget) { currentPiece.shape = aiTarget.shape; pieceX = aiTarget.x; }
+}
+
+// ---- GAME LOOP ----
+
+function gameLoop(delta) {
+    const shape = currentPiece.shape;
+
+    if (willCollide(shape, pieceX, pieceY)) {
+        lockDelay += delta;
+        if (lockDelay > LOCK_TIME) {
+            lockPiece(shape, pieceX, pieceY, currentPiece.color);
+            clearLines();
+            resetPiece();
+            lockDelay = 0;
+        }
+    } else {
+        lockDelay = 0;
+        pieceY++;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawBoard();
+    drawPiece(currentPiece, pieceX, pieceY);
+}
+
+document.addEventListener("keydown", (e) => {
+    if (e.altKey && e.shiftKey && e.key === "B") {
+        aiEnabled = !aiEnabled;
+        if (aiEnabled) aiDecideMove();
+        return;
+    }
+
+    if (aiEnabled) return;
+
+    if (e.key === "ArrowDown") {
+        if (!willCollide(currentPiece.shape, pieceX, pieceY + 1)) pieceY++;
+    }
+    if (e.key === "ArrowUp") {
+        const rotated = rotate(currentPiece.shape);
+        if (canPlace(rotated, pieceX, pieceY)) currentPiece.shape = rotated;
+        else if (canPlace(rotated, pieceX + 1, pieceY)) { pieceX++; currentPiece.shape = rotated; }
+        else if (canPlace(rotated, pieceX - 1, pieceY)) { pieceX--; currentPiece.shape = rotated; }
+    }
+    if (e.key === "ArrowLeft") {
+        if (!willCollideSide(currentPiece.shape, pieceX, pieceY, -1)) pieceX--;
+    }
+    if (e.key === "ArrowRight") {
+        if (!willCollideSide(currentPiece.shape, pieceX, pieceY, 1)) pieceX++;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawBoard();
+    drawPiece(currentPiece, pieceX, pieceY);
+});
+
+function update(time = 0) {
+    if (startTime === null) startTime = time;
+    const delta = time - lastTime;
+    const elapsed = time - startTime;
+
+    if (delta > fallSpeed) {
+        gameLoop(delta);
+        lastTime = time;
+    }
+
+    fallSpeed = Math.max(80, 500 - Math.floor(elapsed / 5000) * 60);
+    requestAnimationFrame(update);
+}
+
+update();
+</script>
+</body>
+</html>
